@@ -9,6 +9,8 @@ from sklearn.metrics import explained_variance_score
 from scipy.stats import pearsonr
 from typing import List, Callable, Dict
 
+import torch
+
 
 def load_it_data(path_to_data):
     """ Load IT data
@@ -123,3 +125,45 @@ def compare_metrics(metric_fn: Callable[[np.ndarray, np.ndarray], float],
     after = metric_fn(y_true, predictions[key_after])
     print(f"{metric_name}: after {after} - before {before}")
     print(f"{metric_name} residual {after - before}\n")
+
+def train_model(model, loss_fn, opt, train_loader, val_inputs, val_targets, metric_fn, epochs):
+    """
+    Train the model using the provided loss function and optimizer.
+    Args:
+        model (torch.nn.Module): The model to train.
+        loss_fn (callable): The loss function to use.
+        opt (torch.optim.Optimizer): The optimizer to use.
+        train_loader (torch.utils.data.DataLoader): DataLoader for the training set.
+        val_loader (torch.utils.data.DataLoader): DataLoader for the validation set.
+        metric_fn (callable): The metric function to use for evaluation.
+        epochs (int): Number of epochs to train for.
+    """
+    for ep in range(epochs):
+        # Training
+        model.train()
+        for it, batch in enumerate(train_loader):
+            inputs, targets = batch
+
+            # Run forward pass
+            predictions = model(inputs)
+            
+            # Compute loss
+            loss = loss_fn(predictions, targets)
+            
+            # Run backward pass
+            loss.backward()
+            
+            # Update the weights using optimizer
+            opt.step()
+            
+            # Zero-out the accumualted gradients
+            opt.zero_grad()
+
+            print('\rEp {}/{}, it {}/{}: loss train: {:.2f}'.
+                  format(ep + 1, epochs, it + 1, len(train_loader), loss), end='')
+
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            metric = metric_fn(val_targets.detach().cpu().numpy(), model(val_inputs).detach().cpu().numpy())
+            print(', metric validation: {:.2f}'.format(metric))
