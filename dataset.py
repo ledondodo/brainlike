@@ -16,8 +16,8 @@ class SpikesDataset(Dataset):
     
 class ActivationsDataset(Dataset):
     def __init__(self, activations, spikes, device):
-        self.activations = activations.to(device)
-        self.spikes = torch.tensor(spikes, dtype=torch.float32, device=device)
+        self.activations = activations
+        self.spikes = spikes
 
     def __len__(self):
         return len(self.activations)
