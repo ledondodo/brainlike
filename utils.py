@@ -5,11 +5,15 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sklearn.metrics import explained_variance_score
+from sklearn.metrics import mean_squared_error, explained_variance_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.linear_model import Ridge
 from scipy.stats import pearsonr
 from typing import List, Callable, Dict
+from tqdm import tqdm
 
 import torch
+from torchvision.models.feature_extraction import create_feature_extractor
 
 
 def load_it_data(path_to_data):
@@ -167,3 +171,90 @@ def train_model(model, loss_fn, opt, train_loader, val_inputs, val_targets, metr
         with torch.no_grad():
             metric = metric_fn(val_targets.detach().cpu().numpy(), model(val_inputs).detach().cpu().numpy())
             print(', metric validation: {:.2f}'.format(metric))
+
+
+def predict_with_best_model(
+    it_data_dir: str,
+    stimulus_pred: np.ndarray
+):
+    """Predict spikes of the 168 IT neurons with the best model using the given stimulus batch.
+    Args:
+        it_data_dir (str): Path to the data directory.
+        stimulus_pred (np.ndarray): Stimulus batch to predict.
+    Returns:
+        np.ndarray: Predicted spikes.
+    """
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Computation on {device}.")
+
+    # Load the data
+    stimulus_train, stimulus_val, stimulus_test, objects_train, objects_val, objects_test, spikes_train, spikes_val = load_it_data(it_data_dir)
+
+    # Load the pre-trained model
+    model = torch.hub.load('facebookresearch/barlowtwins:main', 'resnet50')
+    model = model.to(device)
+    model.eval()
+
+    # Run the pre-trained model to get the activations
+    return_node = 'layer4.0'
+    imgs_tr = torch.from_numpy(stimulus_train).to(device)
+    imgs_pred = torch.from_numpy(stimulus_pred).to(device)
+    with torch.no_grad():
+        print(f"Extracting {return_node}:")
+        
+        # Forward training set
+        extractor = create_feature_extractor(model, return_nodes={return_node:return_node})
+        activation_tr = extractor(imgs_tr)[return_node]
+        activation_tr = activation_tr.flatten(1)
+
+        print(f"   Fitting PCA on training set {tuple(activation_tr.shape)}...")
+        U, S, V = torch.pca_lowrank(activation_tr, 1000) # components may be approximate
+        activation_tr = (activation_tr @ V).cpu()
+        print(f"   Extracted reduced training activations {tuple(activation_tr.shape)}.")
+        del U, S
+
+        # Forward validation set
+        activation_pred = extractor(imgs_pred)[return_node]
+        activation_pred = (activation_pred.flatten(1) @ V).cpu()
+        print(f"   Extracted reduced validation activations {tuple(activation_pred.shape)}.")
+        del extractor, V
+
+        torch.cuda.empty_cache()
+    
+    lbds = np.logspace(0, 7, 100)
+    skf = StratifiedKFold()
+
+    evs, corrs, mses = [], [], []
+
+    print("Cross-validation for ridge coefficient:")
+    for i in tqdm(range(len(lbds))):
+
+        ev_lbd, corr_lbd, mse_lbd = 0, 0, 0
+
+        for j, (tr_idx, val_idx) in enumerate(skf.split(activation_tr, objects_train)):
+            # Use PC for better fit
+            x_tr_fold = activation_tr[tr_idx]
+            x_val_fold = activation_tr[val_idx]
+            y_tr_fold = spikes_train[tr_idx]
+            y_val_fold = spikes_train[val_idx]
+
+            reg_fold = Ridge(lbds[i])
+            reg_fold.fit(x_tr_fold, y_tr_fold)
+            y_pred_fold = reg_fold.predict(x_val_fold)
+
+            # Fold metrics are explained variance, mean neuron correlation and mse 
+            ev_lbd += explained_variance_score(y_val_fold, y_pred_fold)
+            corr_lbd += np.mean([np.corrcoef(y_val_fold[:,neuron], y_pred_fold[:,neuron])[0,1] for neuron in range(y_pred_fold.shape[1])])
+            mse_lbd += mean_squared_error(y_val_fold, y_pred_fold)
+
+        evs.append(ev_lbd/5)
+        corrs.append(corr_lbd/5)
+        mses.append(mse_lbd/5)
+
+    best_lmbd = lbds[np.argmin(mses)]
+    print(f"Best lambda: {best_lmbd}")
+
+    reg = Ridge(best_lmbd)
+    reg.fit(activation_tr, spikes_train)
+    return reg.predict(activation_pred)
